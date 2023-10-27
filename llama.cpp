@@ -9743,6 +9743,116 @@ static std::string llama_decode_text(const std::string & text) {
     return decoded_text;
 }
 
+class utf8_decoder{
+    std::string utf_buf;
+    int state = 0;
+
+    int hexCharToInt(char c) {
+        if (c >= '0' && c <= '9') {
+            return c - '0';
+        } else if (c >= 'A' && c <= 'F') {
+            return 10 + c - 'A';
+        } else if (c >= 'a' && c <= 'f') {
+            return 10 + c - 'a';
+        }
+        // 에러 처리를 추가할 수 있습니다.
+        return -1;
+    }
+
+    int get_utf8_len(char ch){
+        if (!(ch & 0x80)) {
+            return 1;
+        }
+        else if (!(ch & 0x40)) {
+            return 0;
+        }
+        else if (!(ch & 0x20)) {
+            return 2;
+        }
+        else if (!(ch & 0x10)) {
+            return 3;
+        }
+        else if (!(ch & 0x08)) {
+            return 4;
+        }
+    }
+
+public:
+    std::size_t decode(char * buf, std::string_view text){
+        //fprintf(stderr, "text: %s\n", text.data());
+        //memcpy(buf, text.data(), text.length());
+        //return text.length();
+
+        if(state == 0){
+            if(text.empty() == false && text[0] == '<' && text[1] == '0' && text[2] == 'x'){
+                GGML_ASSERT(text.length() == 6);
+                GGML_ASSERT(text[1] == '0');
+                GGML_ASSERT(text[2] == 'x');
+                uint8_t ch = (hexCharToInt(text[3]) << 4) | hexCharToInt(text[4]);
+                int utf_len = get_utf8_len(ch);
+                assert(utf_len == utf8_len(ch));
+                if(utf_len == 0){
+                    assert(utf_len > 0);
+                }
+                else{
+                    if(utf_len == 1){
+                        buf[0] = ch;
+                        state = 0;
+                        return 1;
+                    }
+                    else{
+                        assert(utf_buf.empty());
+                        utf_buf.reserve(utf_len);
+                        utf_buf.push_back(ch);
+                        state = utf_len;
+
+                        //return 0;
+                        buf[0] = ch;
+                        return 1;
+                    }
+                }
+            }
+            else{
+                memcpy(buf, text.data(), text.length());
+                return text.length();
+            }
+        }
+        else{
+            GGML_ASSERT(!text.empty());
+            if(text[0] != '<'){
+                //GGML_ASSERT(text[0] == '<');
+                //GGML_ASSERT(text[1] == '0');
+                //GGML_ASSERT(text[2] == 'x');
+                state = 0;
+                utf_buf.clear();
+                memcpy(buf, text.data(), text.length());
+                return text.length();
+            }
+
+            if(utf_buf.length() < state){
+                uint8_t ch = (hexCharToInt(text[3]) << 4) | hexCharToInt(text[4]);
+                utf_buf.push_back(ch);
+                if(utf_buf.length() == state){
+                    int len = utf_buf.length();
+                    memcpy(buf, utf_buf.c_str(), utf_buf.length());
+                    utf_buf.clear();
+                    state = 0;
+                    //return len;
+                }
+
+                //return 0;
+                buf[0] = ch;
+                return 1;
+            }
+            else{
+                GGML_ASSERT(false);
+                return 0;
+            }
+        }
+    }
+};
+
+utf8_decoder decoder;
 // does not write null-terminator to buf
 int llama_token_to_piece(const struct llama_model * model, llama_token token, char * buf, int length) {
     if (0 <= token && token < llama_n_vocab(model)) {
@@ -9754,8 +9864,7 @@ int llama_token_to_piece(const struct llama_model * model, llama_token token, ch
                 if (length < (int) result.length()) {
                     return -result.length();
                 }
-                memcpy(buf, result.c_str(), result.length());
-                return result.length();
+                return decoder.decode(buf, result);
             } else if (llama_is_unknown_token(model->vocab, token)) { // NOLINT
                 if (length < 3) {
                     return -3;
